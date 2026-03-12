@@ -17,7 +17,7 @@ import time
 import logging
 import os
 from typing import Dict, List, Optional
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -381,48 +381,47 @@ def generate_ai_analysis(
 
     result = None
 
-# 嘗試呼叫 Claude API
-if ANTHROPIC_API_KEY:
+    # 嘗試呼叫 Claude API
+    if ANTHROPIC_API_KEY:
+        prompt = USER_PROMPT_TEMPLATE.format(
+            scores_text=_format_scores(scores),
+            news_text=_format_news(news),
+            market_text=_format_market(market),
+            rules_text=_format_rules(rules),
+            filter_allowed="是" if filter_status.get("allowed") else "否",
+            filter_reason=filter_status.get("reason", ""),
+            positions_text=_format_positions(positions),
+            tw_time=tw_time,
+            us_time=us_time,
+        )
 
-    prompt = USER_PROMPT_TEMPLATE.format(
-        scores_text=_format_scores(scores),
-        news_text=_format_news(news),
-        market_text=_format_market(market),
-        rules_text=_format_rules(rules),
-        filter_allowed="是" if filter_status.get("allowed") else "否",
-        filter_reason=filter_status.get("reason", ""),
-        positions_text=_format_positions(positions),
-        tw_time=tw_time,
-        us_time=us_time,
-    )
+        raw = _call_claude_api(prompt)
 
-    raw = _call_claude_api(prompt)
+        if raw:
+            parsed = _parse_ai_response(raw)
 
-    if raw:
-        parsed = _parse_ai_response(raw)
+            if parsed:
+                parsed.setdefault("conclusion", "目前無法取得明確結論，建議觀望。")
+                parsed.setdefault("direction", "觀望")
+                parsed.setdefault("reasons", [])
+                parsed.setdefault("warnings", [])
+                parsed.setdefault("newsHighlight", "暫無")
+                parsed.setdefault("marketContext", "暫無")
+                parsed.setdefault("suggestion", {
+                    "action": "觀望不操作",
+                    "timing": "等待方向明確",
+                    "stopLoss": "-",
+                    "takeProfit": "-",
+                    "size": "0 口",
+                })
+                parsed.setdefault("confidence", 0.1)
+                parsed.setdefault("sessionNote", "請留意交易時段流動性變化")
 
-        if parsed:
-            parsed.setdefault("conclusion", "目前無法取得明確結論，建議觀望。")
-            parsed.setdefault("direction", "觀望")
-            parsed.setdefault("reasons", [])
-            parsed.setdefault("warnings", [])
-            parsed.setdefault("newsHighlight", "暫無")
-            parsed.setdefault("marketContext", "暫無")
-            parsed.setdefault("suggestion", {
-                "action": "觀望不操作",
-                "timing": "等待方向明確",
-                "stopLoss": "-",
-                "takeProfit": "-",
-                "size": "0 口",
-            })
-            parsed.setdefault("confidence", 0.1)
-            parsed.setdefault("sessionNote", "請留意交易時段流動性變化")
+                parsed["source"] = "claude_api"
+                parsed["generatedAt"] = tw_time
 
-            parsed["source"] = "claude_api"
-            parsed["generatedAt"] = tw_time
-
-            result = parsed
-            logger.info("AI analysis generated via Claude API")
+                result = parsed
+                logger.info("AI analysis generated via Claude API")
 
     # Fallback
     if not result:
