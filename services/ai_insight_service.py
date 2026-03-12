@@ -381,8 +381,9 @@ def generate_ai_analysis(
 
     result = None
 
-   # 嘗試呼叫 Claude API
-    if ANTHROPIC_API_KEY:
+# 嘗試呼叫 Claude API
+if ANTHROPIC_API_KEY:
+
     prompt = USER_PROMPT_TEMPLATE.format(
         scores_text=_format_scores(scores),
         news_text=_format_news(news),
