@@ -1,14 +1,23 @@
 """
 台指期 AI 交易輔助系統 — FastAPI 後端
+
+本機開發：python main.py
 Railway 部署：自動讀取 PORT 環境變數
-本機開發：uvicorn main:app --reload --port 8000
+
+永豐金整合：
+  有設定 SINOPAC_API_KEY → 自動登入 + 訂閱台指期/微台指報價
+  沒設定 → 靜默跳過，不影響其他功能
 """
 import logging
+import os
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+
+# 讀取 .env（本機開發用）
+load_dotenv()
 
 from config import FRONTEND_ORIGINS
 from services.news_service import get_latest_news
@@ -30,10 +39,9 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS — 允許 Vercel 前端跨域
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=FRONTEND_ORIGINS + ["*"],  # 開發階段先開，正式上線可移除 "*"
+    allow_origins=FRONTEND_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -47,12 +55,24 @@ def root():
     return {
         "name": "台指期 AI 交易輔助系統 API",
         "version": "1.0.0",
-        "endpoints": ["/api/news", "/api/market", "/api/scores", "/api/positions", "/api/ai-analysis", "/api/health"],
+        "endpoints": [
+            "/api/news", "/api/market", "/api/scores",
+            "/api/positions", "/api/ai-analysis",
+            "/api/broker/health", "/api/health",
+        ],
     }
 
 
 @app.get("/api/health")
 def health_check():
+    # 檢查永豐金狀態
+    broker_status = "not_connected"
+    try:
+        from services.broker_service import is_connected
+        broker_status = "connected" if is_connected() else "not_connected"
+    except Exception:
+        pass
+
     return {
         "status": "ok",
         "time": datetime.now(timezone(timedelta(hours=8))).isoformat(),
@@ -60,7 +80,7 @@ def health_check():
             "news": "active",
             "market": "active",
             "scoring": "active",
-            "broker": "not_connected",
+            "broker": broker_status,
         },
     }
 
@@ -73,7 +93,7 @@ def api_news(refresh: bool = Query(False)):
 
 @app.get("/api/market")
 def api_market(refresh: bool = Query(False)):
-    """取得市場行情"""
+    """取得市場行情（含台指期/微台指即時報價）"""
     return get_market_data(force_refresh=refresh)
 
 
@@ -113,16 +133,23 @@ def api_scores_meta():
 
 @app.get("/api/positions")
 def api_positions():
-    """取得帳戶持倉（目前 placeholder）"""
+    """取得帳戶持倉"""
+    # 永豐金連線後可以擴充這裡
+    try:
+        from services.broker_service import is_connected
+        connected = is_connected()
+    except Exception:
+        connected = False
+
     return {
-        "connected": False,
-        "broker": "永豐金（尚未接入）",
+        "connected": connected,
+        "broker": "永豐金" if connected else "永豐金（尚未接入）",
         "positions": [],
         "pendingOrders": [],
         "margin": 0,
         "realizedPnl": 0,
         "unrealizedPnl": 0,
-        "note": "永豐金 API 尚未接入，請手動操作下單",
+        "note": "報價已連線，持倉功能待後續開發" if connected else "永豐金 API 尚未接入，請手動操作下單",
     }
 
 
@@ -144,17 +171,25 @@ def api_ai_analysis(refresh: bool = Query(False)):
     if scores.get("globalRisk", 0) < -30:
         filter_status = {"allowed": False, "reason": "全球風險偏高"}
 
-    positions = []
-
     return generate_ai_analysis(
         scores=scores,
         news=news,
         market=market,
         rules=rules,
-        positions=positions,
+        positions=[],
         filter_status=filter_status,
         force_refresh=refresh,
     )
+
+
+@app.get("/api/broker/health")
+def api_broker_health():
+    """永豐金連線狀態"""
+    try:
+        from services.broker_service import get_broker_health
+        return get_broker_health()
+    except Exception:
+        return {"connected": False, "broker": "not_available"}
 
 
 @app.get("/api/signals/history")
@@ -172,18 +207,39 @@ def api_signal_history():
     }]
 
 
-# ─── 啟動提示 ─────────────────────────────────────────────────────
+# ─── Startup / Shutdown ──────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
     logger.info("=" * 60)
     logger.info("台指期 AI 交易輔助系統 後端啟動")
-    logger.info("API 文件：/docs")
+    logger.info("API 文件：http://localhost:8000/docs")
     logger.info("=" * 60)
 
+    # 嘗試連線永豐金
+    try:
+        from services.broker_service import init_broker
+        if init_broker():
+            logger.info("✅ 永豐金已連線，台指期/微台指即時報價啟動")
+        else:
+            logger.info("ℹ️  永豐金未連線（缺少憑證或環境變數），使用 fallback 資料")
+    except ImportError:
+        logger.info("ℹ️  shioaji 未安裝，跳過永豐金連線")
+    except Exception as e:
+        logger.warning(f"永豐金連線失敗: {e}")
 
-# ─── Railway 部署用 ───────────────────────────────────────────────
+
+@app.on_event("shutdown")
+async def shutdown():
+    try:
+        from services.broker_service import shutdown_broker
+        shutdown_broker()
+    except Exception:
+        pass
+    logger.info("後端已關閉")
+
+
+# ─── 啟動 ────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    import os
     import uvicorn
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
