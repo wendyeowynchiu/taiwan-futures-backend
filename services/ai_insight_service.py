@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # ─── 設定 ──────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
 AI_CACHE_SECONDS = 120  # AI 分析快取 2 分鐘（避免頻繁呼叫）
 
 # ─── System Prompt ─────────────────────────────────────────────────
@@ -175,38 +175,33 @@ def _format_positions(positions: List[Dict]) -> str:
     return "\n".join(lines)
 
 
+from anthropic import Anthropic
+
+_client = None
+if ANTHROPIC_API_KEY:
+    _client = Anthropic(api_key=ANTHROPIC_API_KEY)
+
 # ─── 呼叫 Claude API ──────────────────────────────────────────────
 def _call_claude_api(prompt: str) -> Optional[str]:
-    """呼叫 Anthropic Claude API"""
-    if not ANTHROPIC_API_KEY:
+    if not _client:
         logger.warning("ANTHROPIC_API_KEY not set, using fallback analysis")
         return None
 
     try:
-        import requests
-
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-            },
-            json={
-                "model": ANTHROPIC_MODEL,
-                "max_tokens": 1500,
-                "system": SYSTEM_PROMPT,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=30,
+        resp = _client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=1500,
+            system=SYSTEM_PROMPT,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
         )
 
-        if resp.status_code != 200:
-            logger.error(f"Claude API error {resp.status_code}: {resp.text[:200]}")
-            return None
+        text_blocks = []
+        for block in resp.content:
+            if getattr(block, "type", None) == "text":
+                text_blocks.append(block.text)
 
-        data = resp.json()
-        text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
         return "\n".join(text_blocks) if text_blocks else None
 
     except Exception as e:
@@ -379,36 +374,54 @@ def generate_ai_analysis(
         return _ai_cache
 
     # 時間
-    tw_tz = timezone(timedelta(hours=8))
-    us_tz = timezone(timedelta(hours=-5))  # EST (簡化)
-    now = datetime.now(timezone.utc)
-    tw_time = now.astimezone(tw_tz).strftime("%Y-%m-%d %H:%M")
-    us_time = now.astimezone(us_tz).strftime("%Y-%m-%d %H:%M")
+    from zoneinfo import ZoneInfo
+
+    tw_time = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M")
+    us_time = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M")
 
     result = None
 
-    # 嘗試呼叫 Claude API
+   # 嘗試呼叫 Claude API
     if ANTHROPIC_API_KEY:
-        prompt = USER_PROMPT_TEMPLATE.format(
-            scores_text=_format_scores(scores),
-            news_text=_format_news(news),
-            market_text=_format_market(market),
-            rules_text=_format_rules(rules),
-            filter_allowed="是" if filter_status.get("allowed") else "否",
-            filter_reason=filter_status.get("reason", ""),
-            positions_text=_format_positions(positions),
-            tw_time=tw_time,
-            us_time=us_time,
-        )
+    prompt = USER_PROMPT_TEMPLATE.format(
+        scores_text=_format_scores(scores),
+        news_text=_format_news(news),
+        market_text=_format_market(market),
+        rules_text=_format_rules(rules),
+        filter_allowed="是" if filter_status.get("allowed") else "否",
+        filter_reason=filter_status.get("reason", ""),
+        positions_text=_format_positions(positions),
+        tw_time=tw_time,
+        us_time=us_time,
+    )
 
-        raw = _call_claude_api(prompt)
-        if raw:
-            parsed = _parse_ai_response(raw)
-            if parsed:
-                parsed["source"] = "claude_api"
-                parsed["generatedAt"] = tw_time
-                result = parsed
-                logger.info("AI analysis generated via Claude API")
+    raw = _call_claude_api(prompt)
+
+    if raw:
+        parsed = _parse_ai_response(raw)
+
+        if parsed:
+            parsed.setdefault("conclusion", "目前無法取得明確結論，建議觀望。")
+            parsed.setdefault("direction", "觀望")
+            parsed.setdefault("reasons", [])
+            parsed.setdefault("warnings", [])
+            parsed.setdefault("newsHighlight", "暫無")
+            parsed.setdefault("marketContext", "暫無")
+            parsed.setdefault("suggestion", {
+                "action": "觀望不操作",
+                "timing": "等待方向明確",
+                "stopLoss": "-",
+                "takeProfit": "-",
+                "size": "0 口",
+            })
+            parsed.setdefault("confidence", 0.1)
+            parsed.setdefault("sessionNote", "請留意交易時段流動性變化")
+
+            parsed["source"] = "claude_api"
+            parsed["generatedAt"] = tw_time
+
+            result = parsed
+            logger.info("AI analysis generated via Claude API")
 
     # Fallback
     if not result:
@@ -418,4 +431,5 @@ def generate_ai_analysis(
 
     _ai_cache = result
     _ai_cache_time = time.time()
+
     return result
