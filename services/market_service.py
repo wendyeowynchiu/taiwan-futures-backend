@@ -1,6 +1,7 @@
 """
 市場行情抓取服務
-使用 yfinance（免費、不需 API key）
+- 國際行情：yfinance（免費）
+- 台指期/微台指：永豐金 Shioaji（有連線時）或 fallback
 """
 import time
 import logging
@@ -12,17 +13,15 @@ from config import MARKET_SYMBOLS
 
 logger = logging.getLogger(__name__)
 
-# ─── 台指期 / 微台指（yfinance 不直接支援）──────────────────────
-# 方案：用台灣加權指數 ETF 或直接由前端手動輸入
-# 之後接永豐金 Shioaji 時再換成真正的台指期報價
+# ─── 台指期 / 微台指 fallback（永豐金沒連線時用）─────────────────
 TAIWAN_FALLBACK = [
-    {"symbol": "台指期",  "price": 0, "change": 0, "changePct": 0, "status": "unknown", "note": "需接永豐金報價"},
-    {"symbol": "微台指",  "price": 0, "change": 0, "changePct": 0, "status": "unknown", "note": "需接永豐金報價"},
+    {"symbol": "台指期", "price": 0, "change": 0, "changePct": 0, "status": "unknown", "note": "永豐金未連線"},
+    {"symbol": "微台指", "price": 0, "change": 0, "changePct": 0, "status": "unknown", "note": "永豐金未連線"},
 ]
 
 
 def _fetch_single(display_name: str, ticker_symbol: str) -> Optional[Dict]:
-    """抓單一標的即時資料"""
+    """抓單一標的即時資料（yfinance）"""
     try:
         tk = yf.Ticker(ticker_symbol)
         info = tk.fast_info
@@ -37,18 +36,11 @@ def _fetch_single(display_name: str, ticker_symbol: str) -> Optional[Dict]:
             change = 0
             change_pct = 0
 
-        # VIX 反轉邏輯：VIX 下跌 = 偏多
         is_vix = "VIX" in display_name
         if is_vix:
             status = "down" if change < 0 else ("up" if change > 0 else "flat")
         else:
             status = "up" if change > 0 else ("down" if change < 0 else "flat")
-
-        # USD/JPY 特殊處理：yfinance 回傳的是 JPY per USD
-        if ticker_symbol == "JPY=X":
-            # JPY=X 回傳的是 1 USD = ? JPY，需要反轉
-            # 但實際上 yfinance 直接回傳的就是 USD/JPY，不需轉換
-            pass
 
         return {
             "symbol": display_name,
@@ -69,6 +61,27 @@ def _fetch_single(display_name: str, ticker_symbol: str) -> Optional[Dict]:
         }
 
 
+def _get_taiwan_futures() -> List[Dict]:
+    """
+    取得台指期/微台指報價
+    有永豐金連線 → 回傳即時報價
+    沒有 → 回傳 fallback
+    """
+    try:
+        from services.broker_service import is_connected, get_broker_quotes
+
+        if is_connected():
+            quotes = get_broker_quotes()
+            if quotes and any(q.get("price", 0) > 0 for q in quotes):
+                return quotes
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.warning(f"Broker quotes failed: {e}")
+
+    return TAIWAN_FALLBACK
+
+
 # ─── 快取 ─────────────────────────────────────────────────────────
 _market_cache: List[Dict] = []
 _market_cache_time: float = 0
@@ -78,17 +91,19 @@ def get_market_data(force_refresh: bool = False) -> List[Dict]:
     """取得所有觀察標的行情（快取 30 秒）"""
     global _market_cache, _market_cache_time
 
-    if not force_refresh and _market_cache and (time.time() - _market_cache_time < 30):
+    if not force_refresh and _market_cache and (time.time() - _market_cache_time < 10):
         return _market_cache
 
     results = []
+
+    # 國際行情（yfinance）
     for display_name, ticker in MARKET_SYMBOLS.items():
         data = _fetch_single(display_name, ticker)
         if data:
             results.append(data)
 
-    # 加上台指期 / 微台指 placeholder
-    results.extend(TAIWAN_FALLBACK)
+    # 台指期 / 微台指（永豐金或 fallback）
+    results.extend(_get_taiwan_futures())
 
     _market_cache = results
     _market_cache_time = time.time()
