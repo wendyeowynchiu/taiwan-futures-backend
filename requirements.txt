@@ -1,0 +1,7 @@
+# 台指期 AI 交易輔助系統 — 後端依賴
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+yfinance>=0.2.36
+feedparser>=6.0.0
+requests>=2.31.0
+pydantic>=2.0.0
